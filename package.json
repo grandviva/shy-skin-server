@@ -1,0 +1,13 @@
+{
+  "name": "shy-skin-server",
+  "version": "1.0.0",
+  "description": "High-performance Yggdrasil-compatible Skin & Cape Cloud Server for Shy Minecraft Launcher",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
