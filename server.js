@@ -66,6 +66,55 @@ function cleanUuid(uuid) {
   return (uuid || '').replace(/-/g, '').toLowerCase();
 }
 
+function getProfileTextures(profile, queriedUuid, baseUrl) {
+  const safeUuid = cleanUuid(queriedUuid || profile.uuid);
+  let skinHash = profile.skinHash;
+  if (!skinHash) {
+    const p = path.join(SKINS_DIR, `${safeUuid}.png`);
+    if (fs.existsSync(p)) {
+      const buf = fs.readFileSync(p);
+      skinHash = crypto.createHash('sha1').update(buf).digest('hex');
+      try {
+        fs.writeFileSync(path.join(SKINS_DIR, `${skinHash}.png`), buf);
+      } catch {}
+      profile.skinHash = skinHash;
+      saveProfiles();
+    } else {
+      skinHash = safeUuid;
+    }
+  }
+
+  const textures = {
+    SKIN: {
+      url: `${baseUrl}/textures/${skinHash}.png`,
+      ...(profile.model === 'slim' ? { metadata: { model: 'slim' } } : {}),
+    },
+  };
+
+  if (profile.hasCape) {
+    let capeHash = profile.capeHash;
+    if (!capeHash) {
+      const cp = path.join(CAPES_DIR, `${safeUuid}.png`);
+      if (fs.existsSync(cp)) {
+        const buf = fs.readFileSync(cp);
+        capeHash = crypto.createHash('sha1').update(buf).digest('hex');
+        try {
+          fs.writeFileSync(path.join(CAPES_DIR, `${capeHash}.png`), buf);
+        } catch {}
+        profile.capeHash = capeHash;
+        saveProfiles();
+      } else {
+        capeHash = safeUuid;
+      }
+    }
+    textures.CAPE = {
+      url: `${baseUrl}/textures/cape_${capeHash}.png`,
+    };
+  }
+
+  return textures;
+}
+
 const PORT = process.env.PORT || 10000;
 
 const server = http.createServer(async (req, res) => {
@@ -216,26 +265,15 @@ const server = http.createServer(async (req, res) => {
 
     if (profile && profile.hasSkin) {
       const username = profile.username || 'Player';
-      const model = profile.model || 'default';
+      const textures = getProfileTextures(profile, queriedUuid, baseUrl);
 
       const texturesObj = {
         timestamp: Date.now(),
         profileId: queriedUuid,
         profileName: username,
         signatureRequired: true,
-        textures: {
-          SKIN: {
-            url: `${baseUrl}/textures/${queriedUuid}/skin.png`,
-            ...(model === 'slim' ? { metadata: { model: 'slim' } } : {}),
-          },
-        },
+        textures,
       };
-
-      if (profile.hasCape) {
-        texturesObj.textures.CAPE = {
-          url: `${baseUrl}/textures/${queriedUuid}/cape.png`,
-        };
-      }
 
       const base64Value = Buffer.from(JSON.stringify(texturesObj)).toString('base64');
       const signer = crypto.createSign('SHA1');
@@ -344,22 +382,14 @@ const server = http.createServer(async (req, res) => {
 
     if (profile) {
       const qUuid = cleanUuid(profile.uuid);
+      const textures = getProfileTextures(profile, qUuid, baseUrl);
       const texturesObj = {
         timestamp: Date.now(),
         profileId: qUuid,
         profileName: username,
         signatureRequired: true,
-        textures: {
-          SKIN: {
-            url: `${baseUrl}/textures/${qUuid}/skin.png`,
-            ...(profile.model === 'slim' ? { metadata: { model: 'slim' } } : {}),
-          },
-        },
+        textures,
       };
-
-      if (profile.hasCape) {
-        texturesObj.textures.CAPE = { url: `${baseUrl}/textures/${qUuid}/cape.png` };
-      }
 
       const base64Value = Buffer.from(JSON.stringify(texturesObj)).toString('base64');
       const signer = crypto.createSign('SHA1');
@@ -444,17 +474,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // --- 5. SERVE SKIN PNG (/textures/:uuid/skin.png) ---
-  const skinMatch = url.match(/^\/textures\/([a-f0-9]+)\/skin\.png/);
-  if (skinMatch) {
-    const uuid = skinMatch[1];
-    const skinPath = path.join(SKINS_DIR, `${uuid}.png`);
-    if (fs.existsSync(skinPath)) {
-      const imgBuf = fs.readFileSync(skinPath);
+  // --- 5. SERVE CAPE PNG ---
+  const capeNewMatch = url.match(/^\/textures\/cape_([a-f0-9]+)\.png/);
+  const capeLegacyMatch = url.match(/^\/textures\/([a-f0-9]+)\/cape\.png/);
+  const capeMatch = capeNewMatch || capeLegacyMatch;
+  if (capeMatch) {
+    const id = capeMatch[1];
+    const capePath = path.join(CAPES_DIR, `${id}.png`);
+    if (fs.existsSync(capePath)) {
+      const imgBuf = fs.readFileSync(capePath);
       res.writeHead(200, {
         'Content-Type': 'image/png',
         'Content-Length': imgBuf.length,
-        'Cache-Control': 'public, max-age=3600',
+        'Cache-Control': 'public, max-age=31536000, immutable',
       });
       res.end(imgBuf);
       return;
@@ -464,17 +496,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // --- 6. SERVE CAPE PNG (/textures/:uuid/cape.png) ---
-  const capeMatch = url.match(/^\/textures\/([a-f0-9]+)\/cape\.png/);
-  if (capeMatch) {
-    const uuid = capeMatch[1];
-    const capePath = path.join(CAPES_DIR, `${uuid}.png`);
-    if (fs.existsSync(capePath)) {
-      const imgBuf = fs.readFileSync(capePath);
+  // --- 6. SERVE SKIN PNG ---
+  const skinNewMatch = url.match(/^\/textures\/([a-f0-9]+)\.png/);
+  const skinLegacyMatch = url.match(/^\/textures\/([a-f0-9]+)\/skin\.png/);
+  const skinMatch = skinNewMatch || skinLegacyMatch;
+  if (skinMatch) {
+    const id = skinMatch[1];
+    const skinPath = path.join(SKINS_DIR, `${id}.png`);
+    if (fs.existsSync(skinPath)) {
+      const imgBuf = fs.readFileSync(skinPath);
       res.writeHead(200, {
         'Content-Type': 'image/png',
         'Content-Length': imgBuf.length,
-        'Cache-Control': 'public, max-age=3600',
+        'Cache-Control': 'public, max-age=31536000, immutable',
       });
       res.end(imgBuf);
       return;
@@ -512,15 +546,22 @@ const server = http.createServer(async (req, res) => {
         // Invalidate proxy cache for this UUID
         proxyCache.delete(safeUuid);
 
-        // Save skin PNG
+        // Save skin PNG by both hash and uuid
         const cleanSkinData = skinBase64.replace(/^data:image\/\w+;base64,/, '');
-        fs.writeFileSync(path.join(SKINS_DIR, `${safeUuid}.png`), Buffer.from(cleanSkinData, 'base64'));
+        const skinBuf = Buffer.from(cleanSkinData, 'base64');
+        const skinHash = crypto.createHash('sha1').update(skinBuf).digest('hex');
+        fs.writeFileSync(path.join(SKINS_DIR, `${skinHash}.png`), skinBuf);
+        fs.writeFileSync(path.join(SKINS_DIR, `${safeUuid}.png`), skinBuf);
 
         // Save cape PNG if provided
         let hasCape = false;
+        let capeHash = null;
         if (capeBase64) {
           const cleanCapeData = capeBase64.replace(/^data:image\/\w+;base64,/, '');
-          fs.writeFileSync(path.join(CAPES_DIR, `${safeUuid}.png`), Buffer.from(cleanCapeData, 'base64'));
+          const capeBuf = Buffer.from(cleanCapeData, 'base64');
+          capeHash = crypto.createHash('sha1').update(capeBuf).digest('hex');
+          fs.writeFileSync(path.join(CAPES_DIR, `${capeHash}.png`), capeBuf);
+          fs.writeFileSync(path.join(CAPES_DIR, `${safeUuid}.png`), capeBuf);
           hasCape = true;
         }
 
@@ -529,19 +570,23 @@ const server = http.createServer(async (req, res) => {
           uuid: safeUuid,
           model: model === 'slim' ? 'slim' : 'default',
           hasSkin: true,
+          skinHash,
           hasCape,
+          capeHash,
           updatedAt: Date.now(),
         };
 
         saveProfiles();
 
-        console.log(`[Upload] Updated skin for ${username} (${safeUuid})`);
+        console.log(`[Upload] Updated skin for ${username} (${safeUuid}), skinHash: ${skinHash}`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
             success: true,
-            skinUrl: `${baseUrl}/textures/${safeUuid}/skin.png`,
-            capeUrl: hasCape ? `${baseUrl}/textures/${safeUuid}/cape.png` : undefined,
+            skinHash,
+            capeHash,
+            skinUrl: `${baseUrl}/textures/${skinHash}.png`,
+            capeUrl: hasCape ? `${baseUrl}/textures/cape_${capeHash}.png` : undefined,
           })
         );
       } catch (err) {
