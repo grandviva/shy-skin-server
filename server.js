@@ -89,8 +89,37 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // --- HTML LANDING PAGE (for browsers) ---
-  if ((url === '/' || url === '') && req.headers['accept']?.includes('text/html')) {
+  // --- 1. YGGDRASIL ROOT METADATA (/ or /api) ---
+  // Guaranteed JSON for authlib-injector and Minecraft clients
+  if (url === '/' || url === '/api' || url.startsWith('/?')) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        meta: {
+          serverName: 'Shy Skin Server',
+          implementationName: 'shy-skin-server',
+          implementationVersion: '1.0.0',
+        },
+        skinDomains: [
+          'localhost',
+          '127.0.0.1',
+          'onrender.com',
+          host,
+          'textures.minecraft.net',
+          'minecraft.net',
+          'mojang.com',
+          'ely.by',
+          '.ely.by',
+          'skinsystem.ely.by',
+        ],
+        signaturePublickey: publicKeyPEM,
+      })
+    );
+    return;
+  }
+
+  // --- HTML STATUS PAGE (/status or /web) ---
+  if (url === '/status' || url === '/web') {
     const playerCount = Object.keys(profiles).length;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`
@@ -168,34 +197,6 @@ const server = http.createServer(async (req, res) => {
       </body>
       </html>
     `);
-    return;
-  }
-
-  // --- 1. YGGDRASIL ROOT METADATA (/ or /api) ---
-  if (url === '/' || url === '/api' || url.startsWith('/?')) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        meta: {
-          serverName: 'Shy Skin Server',
-          implementationName: 'shy-skin-server',
-          implementationVersion: '1.0.0',
-        },
-        skinDomains: [
-          'localhost',
-          '127.0.0.1',
-          'onrender.com',
-          host,
-          'textures.minecraft.net',
-          'minecraft.net',
-          'mojang.com',
-          'ely.by',
-          '.ely.by',
-          'skinsystem.ely.by',
-        ],
-        signaturePublickey: publicKeyPEM,
-      })
-    );
     return;
   }
 
