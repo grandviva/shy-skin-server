@@ -59,12 +59,13 @@ function saveProfiles() {
   }
 }
 
-// Helper to clean UUID
+// In-memory cache for proxied Ely.by & Mojang textures (TTL: 10 minutes)
+const proxyCache = new Map();
+
 function cleanUuid(uuid) {
   return (uuid || '').replace(/-/g, '').toLowerCase();
 }
 
-// HTTP Server
 const PORT = process.env.PORT || 10000;
 
 const server = http.createServer(async (req, res) => {
@@ -131,6 +132,13 @@ const server = http.createServer(async (req, res) => {
             margin-bottom: 20px;
           }
           p { color: rgba(255, 255, 255, 0.6); line-height: 1.6; }
+          .features {
+            text-align: left;
+            margin: 20px 0;
+            font-size: 14px;
+            color: rgba(255,255,255,0.7);
+          }
+          .features li { margin-bottom: 8px; }
           .code {
             background: rgba(0,0,0,0.4);
             border: 1px solid rgba(255,255,255,0.08);
@@ -149,6 +157,11 @@ const server = http.createServer(async (req, res) => {
           <h1>🌙 Shy Skin Cloud</h1>
           <div class="badge">● Online & Ready</div>
           <p>Официальный сервер синхронизации скинов и плащей для лаунчера Shy.</p>
+          <ul class="features">
+            <li>✨ Поддержка кастомных скинов Shy Launcher</li>
+            <li>🔄 Авто-проксирование скинов игроков с <strong>Ely.by</strong></li>
+            <li>👑 Авто-проксирование лицензионных скинов <strong>Mojang/Microsoft</strong></li>
+          </ul>
           <p>Зарегистрировано скинов игроков: <strong>${playerCount}</strong></p>
           <div class="code">${baseUrl}</div>
         </div>
@@ -174,7 +187,10 @@ const server = http.createServer(async (req, res) => {
           'onrender.com',
           host,
           'textures.minecraft.net',
+          'minecraft.net',
+          'mojang.com',
           'ely.by',
+          '.ely.by',
           'skinsystem.ely.by',
         ],
         signaturePublickey: publicKeyPEM,
@@ -191,62 +207,131 @@ const server = http.createServer(async (req, res) => {
     const parts = url.split('?')[0].split('/');
     const queriedUuid = cleanUuid(parts[parts.length - 1]);
 
-    // Check if we have this profile or find by UUID
+    // 2.1. Check Shy Launcher custom uploads first
     let profile = profiles[queriedUuid];
     if (!profile) {
-      // Check if any profile has this username or if queriedUuid matches
       profile = Object.values(profiles).find((p) => cleanUuid(p.uuid) === queriedUuid);
     }
 
-    if (!profile || !profile.hasSkin) {
-      // If no custom skin uploaded on Shy server, return 204 No Content
-      res.writeHead(204);
-      res.end();
+    if (profile && profile.hasSkin) {
+      const username = profile.username || 'Player';
+      const model = profile.model || 'default';
+
+      const texturesObj = {
+        timestamp: Date.now(),
+        profileId: queriedUuid,
+        profileName: username,
+        signatureRequired: true,
+        textures: {
+          SKIN: {
+            url: `${baseUrl}/textures/${queriedUuid}/skin.png`,
+            ...(model === 'slim' ? { metadata: { model: 'slim' } } : {}),
+          },
+        },
+      };
+
+      if (profile.hasCape) {
+        texturesObj.textures.CAPE = {
+          url: `${baseUrl}/textures/${queriedUuid}/cape.png`,
+        };
+      }
+
+      const base64Value = Buffer.from(JSON.stringify(texturesObj)).toString('base64');
+      const signer = crypto.createSign('SHA1');
+      signer.update(base64Value);
+      const signature = signer.sign(privateKeyObject, 'base64');
+
+      const profileResponse = {
+        id: queriedUuid,
+        name: username,
+        properties: [{ name: 'textures', value: base64Value, signature }],
+      };
+
+      console.log(`[Profile] Served Shy custom skin for ${username} (${queriedUuid})`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(profileResponse));
       return;
     }
 
-    const username = profile.username || 'Player';
-    const model = profile.model || 'default';
-
-    const texturesObj = {
-      timestamp: Date.now(),
-      profileId: queriedUuid,
-      profileName: username,
-      signatureRequired: true,
-      textures: {
-        SKIN: {
-          url: `${baseUrl}/textures/${queriedUuid}/skin.png`,
-          ...(model === 'slim' ? { metadata: { model: 'slim' } } : {}),
-        },
-      },
-    };
-
-    if (profile.hasCape) {
-      texturesObj.textures.CAPE = {
-        url: `${baseUrl}/textures/${queriedUuid}/cape.png`,
-      };
+    // 2.2. Check Proxy Cache
+    const cached = proxyCache.get(queriedUuid);
+    if (cached && Date.now() < cached.expires) {
+      if (cached.data) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(cached.data));
+        return;
+      } else {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
     }
 
-    const base64Value = Buffer.from(JSON.stringify(texturesObj)).toString('base64');
-    const signer = crypto.createSign('SHA1');
-    signer.update(base64Value);
-    const signature = signer.sign(privateKeyObject, 'base64');
+    // 2.3. Fallback: Query Ely.by official session server
+    try {
+      const elyRes = await fetch(
+        `https://account.ely.by/api/authlib-injector/sessionserver/session/minecraft/profile/${queriedUuid}`
+      );
+      if (elyRes.ok && elyRes.status === 200) {
+        const elyData = await elyRes.json();
+        const texturesProp = elyData?.properties?.find((p) => p.name === 'textures');
+        if (texturesProp?.value) {
+          // Re-sign Ely.by texture payload with Shy's RSA key so the client accepts it!
+          const signer = crypto.createSign('SHA1');
+          signer.update(texturesProp.value);
+          const signature = signer.sign(privateKeyObject, 'base64');
 
-    const profileResponse = {
-      id: queriedUuid,
-      name: username,
-      properties: [
-        {
-          name: 'textures',
-          value: base64Value,
-          signature,
-        },
-      ],
-    };
+          const profileResponse = {
+            id: queriedUuid,
+            name: elyData.name || 'Player',
+            properties: [{ name: 'textures', value: texturesProp.value, signature }],
+          };
 
-    console.log(`[Profile] Served textures for ${username} (${queriedUuid})`);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(profileResponse));
+          proxyCache.set(queriedUuid, { data: profileResponse, expires: Date.now() + 600000 });
+          console.log(`[Proxy] Bridged Ely.by skin for ${elyData.name} (${queriedUuid})`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(profileResponse));
+          return;
+        }
+      }
+    } catch (elyErr) {
+      console.warn('[Proxy] Ely.by bridge error:', elyErr);
+    }
+
+    // 2.4. Fallback: Query Mojang session server (for licensed Minecraft players)
+    try {
+      const mojangRes = await fetch(
+        `https://sessionserver.mojang.com/session/minecraft/profile/${queriedUuid}`
+      );
+      if (mojangRes.ok && mojangRes.status === 200) {
+        const mojangData = await mojangRes.json();
+        const texturesProp = mojangData?.properties?.find((p) => p.name === 'textures');
+        if (texturesProp?.value) {
+          const signer = crypto.createSign('SHA1');
+          signer.update(texturesProp.value);
+          const signature = signer.sign(privateKeyObject, 'base64');
+
+          const profileResponse = {
+            id: queriedUuid,
+            name: mojangData.name || 'Player',
+            properties: [{ name: 'textures', value: texturesProp.value, signature }],
+          };
+
+          proxyCache.set(queriedUuid, { data: profileResponse, expires: Date.now() + 600000 });
+          console.log(`[Proxy] Bridged Mojang skin for ${mojangData.name} (${queriedUuid})`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(profileResponse));
+          return;
+        }
+      }
+    } catch (mojangErr) {
+      console.warn('[Proxy] Mojang bridge error:', mojangErr);
+    }
+
+    // Cache negative lookup for 1 minute
+    proxyCache.set(queriedUuid, { data: null, expires: Date.now() + 60000 });
+    res.writeHead(204);
+    res.end();
     return;
   }
 
@@ -289,6 +374,27 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Try proxy hasJoined to Ely.by
+    try {
+      const elyRes = await fetch(`https://account.ely.by/api/authlib-injector${url}`);
+      if (elyRes.ok && elyRes.status === 200) {
+        const elyData = await elyRes.json();
+        const texturesProp = elyData?.properties?.find((p) => p.name === 'textures');
+        if (texturesProp?.value) {
+          const signer = crypto.createSign('SHA1');
+          signer.update(texturesProp.value);
+          const signature = signer.sign(privateKeyObject, 'base64');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            id: elyData.id,
+            name: elyData.name,
+            properties: [{ name: 'textures', value: texturesProp.value, signature }],
+          }));
+          return;
+        }
+      }
+    } catch {}
+
     res.writeHead(204);
     res.end();
     return;
@@ -314,6 +420,23 @@ const server = http.createServer(async (req, res) => {
       }));
       return;
     }
+
+    // Try Ely.by
+    try {
+      const elyRes = await fetch('https://account.ely.by/api/authlib-injector/api/profiles/minecraft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([queriedName]),
+      });
+      if (elyRes.ok) {
+        const list = await elyRes.json();
+        if (Array.isArray(list) && list.length > 0) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(list[0]));
+          return;
+        }
+      }
+    } catch {}
 
     res.writeHead(204);
     res.end();
@@ -366,7 +489,6 @@ const server = http.createServer(async (req, res) => {
     req.on('data', (chunk) => {
       body += chunk;
       if (body.length > 5 * 1024 * 1024) {
-        // 5MB limit
         res.writeHead(413);
         res.end(JSON.stringify({ error: 'Payload too large' }));
         req.destroy();
@@ -385,6 +507,9 @@ const server = http.createServer(async (req, res) => {
         }
 
         const safeUuid = cleanUuid(uuid || crypto.createHash('md5').update(`OfflinePlayer:${username}`).digest('hex'));
+
+        // Invalidate proxy cache for this UUID
+        proxyCache.delete(safeUuid);
 
         // Save skin PNG
         const cleanSkinData = skinBase64.replace(/^data:image\/\w+;base64,/, '');
